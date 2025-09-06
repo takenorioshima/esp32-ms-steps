@@ -41,8 +41,9 @@ int lengthValues[NUM_TRACKS];
 bool activeNotes[NUM_TRACKS] = {false};
 int activeNoteValues[NUM_TRACKS] = {0};
 int activeNoteLengths[NUM_TRACKS] = {0};
+unsigned long noteOnTime[NUM_TRACKS] = {0};
 
-const int LENGTH_OPTIONS[] = {1, 2, 3, 4, 5, 6, 7, 8}; // 1/16, 1/8, 3/16, 1/4, 3/8, 1/2
+const int LENGTH_OPTIONS[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 0}; // 1/16, 1/8, 3/16, 1/4, 3/8, 1/2
 const int NUM_LENGTHS = sizeof(LENGTH_OPTIONS) / sizeof(LENGTH_OPTIONS[0]);
 
 Button trackAButton(PIN_TRACK_A, 50);
@@ -74,6 +75,7 @@ float sixteenthMs()
 // MIDI
 const int MIDI_CH = 1;
 BLEMIDI_CREATE_INSTANCE("MS. STEPS", MIDI);
+const char* NOTE_NAMES[] = {"C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"};
 
 // Send a NoteOn message for the specified note (MIDI note number).
 void sendNoteOn(int note)
@@ -92,14 +94,57 @@ void sendNoteOff(int note)
 
 // OLED
 SSD1306Wire display(0x3c, SDA, SCL);
+const int SCREEN_WIDTH = 128;
+const int SCREEN_HEIGHT = 64;
 unsigned long oledLastUpdatedAt = 0;
 const unsigned long oledUpdateInterval = 1000 / 30; // = 30Hz.
 
+String midiNoteToName(int noteNumber) {
+  int noteIndex = noteNumber % 12;
+  int octave = noteNumber / 12 - 1; // MIDI 0 = C-1
+  return String(NOTE_NAMES[noteIndex]) + String(octave);
+}
+
 void drawDisplay()
 {
+  unsigned long now = millis();
+  if (now - oledLastUpdatedAt < oledUpdateInterval)
+  {
+    return;
+  }
+
   display.clear();
-  display.drawLine(63, 16, 47, 48);
+
+  // Draw vertical thirds
+  int thirdWidth = SCREEN_WIDTH / 3;
+  display.drawLine(thirdWidth, 0, thirdWidth, SCREEN_HEIGHT - 12);
+  display.drawLine(thirdWidth * 2, 0, thirdWidth * 2, SCREEN_HEIGHT - 12);
+
+  // Draw note name, note length and sendNodeOn/Off indicators
+  for (int i = 0; i < NUM_TRACKS; i++)
+  {
+    int centerX = thirdWidth * i + thirdWidth / 2;
+    
+    // Draw note name
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    display.setFont(ArialMT_Plain_16);
+    display.drawString(centerX, 0, midiNoteToName(noteValues[i]));
+
+    // Draw note length
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(centerX, 17, String(lengthValues[i])+"/16");
+  
+    if (activeNotes[i])
+    {
+      display.fillCircle(centerX, 41, 10); // これが 1/16 の時だけ常時点灯になっちゃう
+    }
+  }
+
+  display.drawString(SCREEN_WIDTH/2, SCREEN_HEIGHT - 10, "MS. STEPS");
+
   display.display();
+
+  oledLastUpdatedAt = now;
 }
 
 void handleBLEMIDIConnected()
@@ -133,10 +178,10 @@ void updatePots()
     lengthValues[1] = 5;
     lengthValues[2] = 7;
 
-    Serial.print("Note: ");
-    Serial.println(noteValues[0]);
-    Serial.print("Length: ");
-    Serial.println(lengthValues[0]);
+    // Serial.print("Note: ");
+    // Serial.println(noteValues[0]);
+    // Serial.print("Length: ");
+    // Serial.println(lengthValues[0]);
     lastAnalogReadAt = millis();
   }
 }
@@ -163,6 +208,7 @@ void setup()
   // attachInterrupt(digitalPinToInterrupt(GATE_PIN), gateISR, RISING);
 
   display.init();
+  display.flipScreenVertically();
   drawDisplay();
 }
 
@@ -199,23 +245,37 @@ void loop()
 
     for (int i = 0; i < NUM_TRACKS; i++)
     {
-      if (clockCount % lengthValues[i] == 0)
+      if(lengthValues[i] == 0)
       {
+        if (activeNotes[i]) {
+          sendNoteOff(activeNoteValues[i]);
+          activeNotes[i] = false;
+        }
+        continue;
+      }
+
+      if (!activeNotes[i] && clockCount % lengthValues[i] == 0)
+      {
+        // Note on handling
         sendNoteOn(noteValues[i]);
         activeNotes[i] = true;
         activeNoteValues[i] = noteValues[i];
         activeNoteLengths[i] = lengthValues[i];
+        noteOnTime[i] = millis();
       }
 
-      int offClock = (activeNoteLengths[i] + 1) / 2;
-      if (activeNotes[i] && (clockCount % activeNoteLengths[i] == offClock % activeNoteLengths[i]))
-      {
-        sendNoteOff(activeNoteValues[i]);
-        activeNotes[i] = false;
+      if (activeNotes[i]) {
+        // Note off handling
+        unsigned long durationMs = sixteenthMs() * activeNoteLengths[i] / 2;
+        if (millis() - noteOnTime[i] >= durationMs) {
+          sendNoteOff(activeNoteValues[i]);
+          activeNotes[i] = false;
+        }
       }
     }
   }
 
+  drawDisplay();
   delay(1); // To avoid busy loop.
 }
 
